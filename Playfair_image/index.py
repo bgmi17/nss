@@ -1,146 +1,111 @@
-"""
-BINARY POLYNOMIAL ARITHMETIC
+import string
+import numpy as np
+from PIL import Image
 
-These functions operate on binary polynomials (Z/2Z[x]), expressed as coefficient bitmasks, etc:
-  0b100111 -> x^5 + x^2 + x + 1
-As an implied precondition, parameters are assumed to be *nonnegative* integers unless otherwise noted.
-This code is time-sensitive and thus NOT safe to use for online cryptography.
-"""
+def prepare_key(key):
+    # Remove whitespaces and convert to uppercase
+    key = key.replace(" ", "").upper()
 
-from typing import Tuple
+    # Remove duplicate characters while maintaining the order
+    key = "".join(dict.fromkeys(key))
 
-# descriptive aliases (assumed not to be negative)
-Natural = int
-BPolynomial = int
+    # Add remaining characters (letters, numbers, and special characters) to the key
+    remaining_chars = [chr(ch) for ch in np.arange(255,-1,-1).tolist() if chr(ch) not in key]
+    key += "".join(remaining_chars)
 
+    return key
 
-def p_mul(a: BPolynomial, b: BPolynomial) -> BPolynomial:
-    """ Binary polynomial multiplication (peasant). """
-    result = 0
-    while a and b:
-        if a & 1:
-            result ^= b
-        a >>= 1
-        b <<= 1
-    return result
+def create_playfair_matrix(key):
+    key = prepare_key(key)
+    matrix = [['' for _ in range(16)] for _ in range(16)]
+    char_index = 0
 
+    for row in range(16):
+        for col in range(16):
+            if char_index < len(key):
+                matrix[row][col] = key[char_index]
+                char_index += 1
 
-def p_mod(a: BPolynomial, b: BPolynomial) -> BPolynomial:
-    """ Binary polynomial remainder / modulus.
-        Divides a by b and returns resulting remainder polynomial.
-        Precondition: b != 0 """
-    bl = b.bit_length()
-    while True:
-        shift = a.bit_length() - bl
-        if shift < 0:
-            return a
-        a ^= b << shift
+    return matrix
 
 
-def p_divmod(a: BPolynomial, b: BPolynomial) -> Tuple[BPolynomial, BPolynomial]:
-    """ Binary polynomial division.
-        Divides a by b and returns resulting (quotient, remainder) polynomials.
-        Precondition: b != 0 """
-    q = 0
-    bl = b.bit_length()
-    while True:
-        shift = a.bit_length() - bl
-        if shift < 0:
-            return (q, a)
-        q ^= 1 << shift
-        a ^= b << shift
+def prepare_message(message):
+    message = message.upper()
+    message = message.replace("J", "I")  # Replace 'J' with 'I'
+    message = "".join(filter(str.isalnum, message))  # Remove non-alphanumeric characters
 
+    # Make the message length even by adding an 'X' at the end if necessary
+    if len(message) % 2 != 0:
+        message += 'X'
 
-def p_mod_mul(a: BPolynomial, b: BPolynomial, modulus: BPolynomial) -> BPolynomial:
-    """ Binary polynomial modular multiplication (peasant).
-        Returns p_mod(p_mul(a, b), modulus)
-        Precondition: modulus != 0 and b < modulus """
-    result = 0
-    deg = p_degree(modulus)
-    assert p_degree(b) < deg
-    while a and b:
-        if a & 1:
-            result ^= b
-        a >>= 1
-        b <<= 1
-        if (b >> deg) & 1:
-            b ^= modulus
-    return result
+    return message
 
+def encrypt_playfair(message, key):
+    matrix = create_playfair_matrix(key)
+    message = prepare_message(message)
 
-def p_exp(a: BPolynomial, exponent: Natural) -> BPolynomial:
-    """ Binary polynomial exponentiation by squaring (iterative).
-        Returns polynomial `a` multiplied by itself `exponent` times.
-        Precondition: not (x == 0 and exponent == 0) """
-    factor = a
-    result = 1
-    while exponent:
-        if exponent & 1:
-            result = p_mul(result, factor)
-        factor = p_mul(factor, factor)
-        exponent >>= 1
-    return result
+    encrypted_message = ""
+    i = 0
 
+    while i < len(message):
+        char1 = message[i]
+        i += 1
+        char2 = message[i]
+        i += 1
 
-def p_gcd(a: BPolynomial, b: BPolynomial) -> BPolynomial:
-    """ Binary polynomial euclidean algorithm (iterative).
-        Returns the Greatest Common Divisor of polynomials a and b. """
-    while b:
-        a, b = b, p_mod(a, b)
-    return a
+        row1, col1 = find_char_position(matrix, char1)
+        row2, col2 = find_char_position(matrix, char2)
 
+        if row1 == row2:
+            encrypted_message += matrix[row1][(col1 + 1) % 8]
+            encrypted_message += matrix[row2][(col2 + 1) % 8]
+        elif col1 == col2:
+            encrypted_message += matrix[(row1 + 1) % 8][col1]
+            encrypted_message += matrix[(row2 + 1) % 8][col2]
+        else:
+            encrypted_message += matrix[row1][col2]
+            encrypted_message += matrix[row2][col1]
 
-def p_egcd(a: BPolynomial, b: BPolynomial) -> tuple[BPolynomial, BPolynomial, BPolynomial]:
-    """ Binary polynomial Extended Euclidean algorithm (iterative).
-        Returns (d, x, y) where d is the Greatest Common Divisor of polynomials a and b.
-        x, y are polynomials that satisfy: p_mul(a,x) ^ p_mul(b,y) = d
-        Precondition: b != 0
-        Postcondition: x <= p_div(b,d) and y <= p_div(a,d) """
-    a = (a, 1, 0)
-    b = (b, 0, 1)
-    while True:
-        q, r = p_divmod(a[0], b[0])
-        if not r:
-            return b
-        a, b = b, (r, a[1] ^ p_mul(q, b[1]), a[2] ^ p_mul(q, b[2]))
+    return encrypted_message
 
+def decrypt_playfair(encrypted_message, key):
+    matrix = create_playfair_matrix(key)
 
-def p_mod_inv(a: BPolynomial, modulus: BPolynomial) -> BPolynomial:
-    """ Binary polynomial modular multiplicative inverse.
-        Returns b so that: p_mod(p_mul(a, b), modulus) == 1
-        Precondition: modulus != 0 and p_coprime(a, modulus)
-        Postcondition: b < modulus """
-    d, x, y = p_egcd(a, modulus)
-    assert d == 1  # inverse exists
-    return x
+    decrypted_message = ""
+    i = 0
 
+    while i < len(encrypted_message):
+        char1 = encrypted_message[i]
+        i += 1
+        char2 = encrypted_message[i]
+        i += 1
 
-def p_mod_pow(x: BPolynomial, exponent: Natural, modulus: BPolynomial) -> BPolynomial:
-    """ Binary polynomial modular exponentiation by squaring (iterative).
-        Returns: p_mod(p_exp(x, exponent), modulus)
-        Precondition: modulus > 0
-        Precondition: not (x == 0 and exponent == 0) """
-    factor = x = p_mod(x, modulus)
-    result = 1
-    while exponent:
-        if exponent & 1:
-            result = p_mod_mul(result, factor, modulus)
-        factor = p_mod_mul(factor, factor, modulus)
-        exponent >>= 1
-    return result
+        row1, col1 = find_char_position(matrix, char1)
+        row2, col2 = find_char_position(matrix, char2)
 
+        if row1 == row2:
+            decrypted_message += matrix[row1][(col1 - 1) % 8]
+            decrypted_message += matrix[row2][(col2 - 1) % 8]
+        elif col1 == col2:
+            decrypted_message += matrix[(row1 - 1) % 8][col1]
+            decrypted_message += matrix[(row2 - 1) % 8][col2]
+        else:
+            decrypted_message += matrix[row1][col2]
+            decrypted_message += matrix[row2][col1]
 
-def p_degree(a: BPolynomial) -> int:
-    """ Returns degree of a. """
-    return a.bit_length() - 1
+    return decrypted_message
 
+def find_char_position(matrix, char):
+    for row in range(8):
+        for col in range(8):
+            if matrix[row][col] == char:
+                return row, col
 
-def p_congruent(a: BPolynomial, b: BPolynomial, modulus: BPolynomial) -> bool:
-    """ Checks if a is congruent with b under modulus.
-        Precondition: modulus > 0 """
-    return p_mod(a ^ b, modulus) == 0
+image = Image.open('download.jpg')
+np.asarray(image).shape
 
+def channelSplit(image):
+    return np.dsplit(image,image.shape[-1])
 
-def p_coprime(a: BPolynomial, b: BPolynomial) -> bool:
-    """ Checks if a and b are coprime. """
-    return p_gcd(a, b) == 1
+[B,G,R]=channelSplit(image)
+G
